@@ -30,6 +30,8 @@ class KpopPhotocardBot(commands.Bot):
         await self.load_extension('cogs.gacha')
         await self.load_extension('cogs.collection')
         await self.load_extension('cogs.economy')
+        # CORRECCIÓN: Se agrega la carga del comando de ayuda
+        await self.load_extension('cogs.help_command')
         
         print("Bot inicializado correctamente")
     

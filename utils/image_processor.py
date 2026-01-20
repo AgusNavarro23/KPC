@@ -1,283 +1,280 @@
-from PIL import Image, ImageDraw, ImageFont, ImageFilter
+from PIL import Image, ImageDraw, ImageFont, ImageFilter, ImageOps
 import io
 import os
+import math
 
 class PhotocardProcessor:
     def __init__(self):
-        # Dimensiones estándar de photocard
-        self.card_width = 600
-        self.card_height = 900
-        self.frame_width = 20
+        self.photo_width = 600
+        self.photo_height = 900
         
-        # Colores de marcos por rareza
-        self.frame_colors = {
-            'Common': '#B0B0B0',      # Gris plateado
-            'Uncommon': '#4CAF50',    # Verde
-            'Rare': '#2196F3',        # Azul
-            'Epic': '#9C27B0',        # Púrpura
-            'Legendary': '#FFD700'    # Dorado
+        self.border_size = 50      # Marco un poco más ancho para la textura
+        self.info_height = 280     # Espacio inferior
+        self.corner_radius = 40    # Redondeo de la foto
+        
+        # Colores: (Color Principal, Color Secundario para degradado)
+        self.rarity_theme = {
+            'Common':    ('#B0BEC5', '#78909C'),  # Plata / Gris
+            'Uncommon':  ('#66BB6A', '#2E7D32'),  # Verde Bosque
+            'Rare':      ('#42A5F5', '#1565C0'),  # Azul Océano
+            'Epic':      ('#AB47BC', '#6A1B9A'),  # Púrpura Místico
+            'Legendary': ('#FFCA28', '#FF6F00')   # Oro / Naranja Fuego
         }
         
-        # Colores de brillo/efectos por rareza
-        self.glow_colors = {
-            'Common': None,
-            'Uncommon': '#81C784',
-            'Rare': '#64B5F6',
-            'Epic': '#BA68C8',
-            'Legendary': '#FFE082'
-        }
-        
-        # Intentar cargar fuentes (usa fuentes del sistema si están disponibles)
         self.font_path = self._get_font_path()
+        
+        # Compatibilidad con versiones antiguas de Pillow
+        self.resample_method = Image.Resampling.LANCZOS if hasattr(Image, 'Resampling') else Image.LANCZOS
     
     def _get_font_path(self):
-        """Intenta encontrar una fuente disponible en el sistema"""
+        """Intenta cargar una fuente personalizada primero"""
         possible_fonts = [
-            '/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf',  # Linux
-            'C:\\Windows\\Fonts\\Arial.ttf',  # Windows
-            '/System/Library/Fonts/Helvetica.ttc',  # macOS
-            '/usr/share/fonts/truetype/liberation/LiberationSans-Bold.ttf'  # Linux alternativo
+            'data/fonts/font.ttf', 
+            'data/fonts/arialbd.ttf', # Windows Bold
+            '/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf',
+            'C:\\Windows\\Fonts\\Arial.ttf'
         ]
-        
         for font in possible_fonts:
             if os.path.exists(font):
                 return font
-        
-        return None  # Usará fuente por defecto
+        return None
     
     def create_photocard(self, image_path, card_data):
-        """
-        Crea una photocard con marco y efectos según la rareza
-        
-        Args:
-            image_path: Ruta a la imagen original
-            card_data: dict con 'rarity', 'card_number', 'member', 'group', 'era'
-        
-        Returns:
-            BytesIO object con la imagen procesada
-        """
         rarity = card_data.get('rarity', 'Common')
-        card_number = card_data.get('card_number', '#000')
-        member = card_data.get('member', 'Unknown')
-        group = card_data.get('group', 'Unknown')
-        era = card_data.get('era', '')
-        series = card_data.get('series', 'S1')
+        colors = self.rarity_theme.get(rarity, ('#555555', '#333333'))
         
-        # Crear canvas base
-        canvas_width = self.card_width + (self.frame_width * 2)
-        canvas_height = self.card_height + (self.frame_width * 2) + 120  # Espacio para info
+        # 1. Dimensiones
+        total_width = self.photo_width + (self.border_size * 2)
+        total_height = self.photo_height + self.border_size + self.info_height
         
-        canvas = Image.new('RGB', (canvas_width, canvas_height), 'white')
+        # 2. Crear Fondo con Degradado y Textura
+        canvas = self._create_textured_background(total_width, total_height, colors[0], colors[1])
         draw = ImageDraw.Draw(canvas)
         
-        # Cargar imagen original o crear placeholder
+        # 3. Procesar Imagen del Idol (Recorte + Redondeo)
         try:
-            img = Image.open(image_path)
-            img = img.resize((self.card_width, self.card_height), Image.Resampling.LANCZOS)
-        except:
-            # Crear placeholder si no existe la imagen
-            img = self._create_placeholder(member, group)
+            img = Image.open(image_path).convert("RGBA")
+            # Crop to fill
+            img_ratio = img.width / img.height
+            target_ratio = self.photo_width / self.photo_height
+            
+            if img_ratio > target_ratio:
+                new_width = int(self.photo_height * img_ratio)
+                img = img.resize((new_width, self.photo_height), self.resample_method)
+                left = (new_width - self.photo_width) // 2
+                img = img.crop((left, 0, left + self.photo_width, self.photo_height))
+            else:
+                new_height = int(self.photo_width / img_ratio)
+                img = img.resize((self.photo_width, new_height), self.resample_method)
+                top = (new_height - self.photo_height) // 2
+                img = img.crop((0, top, self.photo_width, top + self.photo_height))
+            
+            # Redondear esquinas de la foto
+            img = self._round_corners(img, self.corner_radius)
+            
+        except Exception as e:
+            print(f"Error imagen: {e}")
+            # Fondo blanco si falla la imagen
+            img = Image.new('RGBA', (self.photo_width, self.photo_height), 'white')
+            img = self._round_corners(img, self.corner_radius)
+
+        # 4. Pegar Imagen (con sombra detrás para profundidad)
+        photo_x = self.border_size
+        photo_y = self.border_size
         
-        # Crear marco con efecto según rareza
-        self._draw_frame(canvas, draw, rarity)
+        # Sombra de la foto
+        shadow = Image.new('RGBA', (self.photo_width, self.photo_height), (0,0,0,0))
+        shadow_draw = ImageDraw.Draw(shadow)
+        # Ajuste para evitar error de coordenadas en Pillow viejos
+        shadow_draw.rounded_rectangle([(0,0), (self.photo_width-1, self.photo_height-1)], radius=self.corner_radius, fill=(0,0,0,80))
+        canvas.paste(shadow, (photo_x + 10, photo_y + 10), shadow)
         
-        # Pegar imagen en el centro
-        canvas.paste(img, (self.frame_width, self.frame_width))
+        # Foto real
+        canvas.paste(img, (photo_x, photo_y), img)
         
-        # Agregar información de la carta
-        self._add_card_info(canvas, draw, card_number, member, group, era, series, rarity)
+        # 5. Textos e Información
+        self._draw_stylish_text(canvas, draw, card_data, total_width, total_height, colors[1])
         
-        # Agregar efectos especiales para rarezas altas
+        # 6. Overlay Brillante (Holográfico simple)
         if rarity in ['Epic', 'Legendary']:
-            canvas = self._add_special_effects(canvas, rarity)
-        
-        # Convertir a bytes
+            self._add_shine_overlay(canvas)
+
+        # Output
         img_bytes = io.BytesIO()
         canvas.save(img_bytes, format='PNG', quality=95)
         img_bytes.seek(0)
-        
         return img_bytes
-    
-    def _draw_frame(self, canvas, draw, rarity):
-        """Dibuja el marco de la photocard"""
-        frame_color = self.frame_colors.get(rarity, self.frame_colors['Common'])
+
+    def _create_textured_background(self, w, h, color_start, color_end):
+        """Crea un degradado vertical y añade líneas de textura"""
+        base = Image.new('RGB', (w, h), color_start)
+        draw = ImageDraw.Draw(base)
         
-        # Marco exterior (más grueso para rarezas altas)
-        thickness = self.frame_width
-        if rarity == 'Legendary':
-            thickness = self.frame_width + 5
-        elif rarity == 'Epic':
-            thickness = self.frame_width + 3
+        r1, g1, b1 = self._hex_to_rgb(color_start)
+        r2, g2, b2 = self._hex_to_rgb(color_end)
         
-        # Dibujar marco principal
-        for i in range(thickness):
-            draw.rectangle(
-                [i, i, canvas.width - i - 1, self.card_height + self.frame_width + i],
-                outline=frame_color,
-                width=2
-            )
+        for y in range(h):
+            r = int(r1 + (r2 - r1) * y / h)
+            g = int(g1 + (g2 - g1) * y / h)
+            b = int(b1 + (b2 - b1) * y / h)
+            draw.line([(0, y), (w, y)], fill=(r,g,b))
+            
+        # Textura
+        texture = Image.new('RGBA', (w, h), (0,0,0,0))
+        txt_draw = ImageDraw.Draw(texture)
         
-        # Marco interior (más sutil)
-        inner_color = self._adjust_brightness(frame_color, 1.3)
-        draw.rectangle(
-            [thickness - 3, thickness - 3, 
-             canvas.width - thickness + 3, self.card_height + thickness + 3],
-            outline=inner_color,
-            width=1
-        )
-    
-    def _add_card_info(self, canvas, draw, card_number, member, group, era, series, rarity):
-        """Agrega la información de la carta en la parte inferior"""
-        info_y = self.card_height + self.frame_width * 2 + 10
+        step = 10 
+        for i in range(-h, w, step):
+            txt_draw.line([(i, 0), (i + h, h)], fill=(0,0,0,20), width=1)
+            txt_draw.line([(i+1, 0), (i + h + 1, h)], fill=(255,255,255,10), width=1)
+            
+        base.paste(texture, (0,0), texture)
+        return base
+
+    def _round_corners(self, img, radius):
+        mask = Image.new("L", img.size, 0)
+        draw = ImageDraw.Draw(mask)
+        draw.rounded_rectangle([(0, 0), (img.width-1, img.height-1)], radius=radius, fill=255)
+        out = ImageOps.fit(img, mask.size, centering=(0.5, 0.5))
+        out.putalpha(mask)
+        return out
+
+    def _draw_stylish_text(self, canvas, draw, data, w, h, accent_color):
+        member = data.get('member', 'Unknown').upper()
+        group = data.get('group', 'Unknown').upper()
         
-        # Cargar fuentes
         try:
             if self.font_path:
-                font_large = ImageFont.truetype(self.font_path, 32)
-                font_medium = ImageFont.truetype(self.font_path, 24)
-                font_small = ImageFont.truetype(self.font_path, 18)
+                font_giant = ImageFont.truetype(self.font_path, 85)
+                font_large = ImageFont.truetype(self.font_path, 45)
+                font_small = ImageFont.truetype(self.font_path, 24)
             else:
-                font_large = ImageFont.load_default()
-                font_medium = ImageFont.load_default()
-                font_small = ImageFont.load_default()
+                font_giant = ImageFont.load_default()
+                font_large = font_small = ImageFont.load_default()
         except:
-            font_large = ImageFont.load_default()
-            font_medium = ImageFont.load_default()
-            font_small = ImageFont.load_default()
+            font_giant = font_large = font_small = ImageFont.load_default()
+
+        text_area_start = self.photo_height + self.border_size
+        center_x = w // 2
         
-        frame_color = self.frame_colors.get(rarity, self.frame_colors['Common'])
-        
-        # Número de carta (esquina superior izquierda del marco)
-        draw.text((25, 15), f"{series}-{card_number}", fill=frame_color, font=font_small)
-        
-        # Nombre del miembro (centrado)
-        member_text = member.upper()
-        bbox = draw.textbbox((0, 0), member_text, font=font_large)
-        text_width = bbox[2] - bbox[0]
-        text_x = (canvas.width - text_width) // 2
-        draw.text((text_x, info_y), member_text, fill='black', font=font_large)
+        # Nombre
+        name_y = text_area_start + 40
+        self._draw_text_with_outline(draw, center_x, name_y, member, font_giant, 'white', 3)
         
         # Grupo
-        group_text = group
-        bbox = draw.textbbox((0, 0), group_text, font=font_medium)
-        text_width = bbox[2] - bbox[0]
-        text_x = (canvas.width - text_width) // 2
-        draw.text((text_x, info_y + 40), group_text, fill='#555555', font=font_medium)
+        group_y = name_y + 85
+        if hasattr(draw, 'textbbox'):
+            group_bbox = draw.textbbox((0,0), f"  {group}  ", font=font_large)
+            gw = group_bbox[2] - group_bbox[0]
+            gh = group_bbox[3] - group_bbox[1]
+        else:
+            gw, gh = 200, 50
+
+        draw.rounded_rectangle(
+            [center_x - gw//2, group_y, center_x + gw//2, group_y + gh + 10], 
+            radius=10, fill=(0,0,0,60)
+        )
+        self._draw_text_with_outline(draw, center_x, group_y, group, font_large, '#EEEEEE', 1)
+
+        # Etiqueta Superior
+        serial = data.get('serial')
+        series = data.get('series', 'S1')
+        card_num = data.get('card_number', '000')
         
-        # Era (si existe)
-        if era:
-            era_text = f"Era: {era}"
-            bbox = draw.textbbox((0, 0), era_text, font=font_small)
+        if serial:
+            tag_text = f"PRINT #{serial.split('-')[-1][-4:]}"
+        else:
+            tag_text = f"{series} · {card_num}"
+            
+        draw.polygon([(20, 0), (20, 60), (160, 60), (180, 0)], fill=accent_color)
+        draw.text((40, 15), tag_text, font=font_small, fill='white')
+
+        # Rareza
+        rarity = data.get('rarity', 'Common').upper()
+        rx = w - 40
+        ry = h - 40
+        
+        if hasattr(draw, 'textbbox'):
+            bbox = draw.textbbox((0,0), rarity, font=font_small)
+            tw = bbox[2] - bbox[0]
+        else:
+            tw = 100
+
+        draw.text((rx - tw, ry - 20), rarity, font=font_small, fill='white')
+        draw.line([(rx - tw - 10, ry + 10), (rx, ry + 10)], fill='white', width=2)
+
+    def _draw_text_with_outline(self, draw, x, y, text, font, fill_color, outline_width):
+        if hasattr(draw, 'textbbox'):
+            bbox = draw.textbbox((0, 0), text, font=font)
             text_width = bbox[2] - bbox[0]
-            text_x = (canvas.width - text_width) // 2
-            draw.text((text_x, info_y + 75), era_text, fill='#888888', font=font_small)
-        
-        # Rareza (esquina inferior derecha)
-        rarity_text = rarity.upper()
-        bbox = draw.textbbox((0, 0), rarity_text, font=font_small)
-        text_width = bbox[2] - bbox[0]
-        draw.text((canvas.width - text_width - 25, canvas.height - 25), 
-                  rarity_text, fill=frame_color, font=font_small)
-    
-    def _add_special_effects(self, canvas, rarity):
-        """Agrega efectos especiales para cartas Epic y Legendary"""
-        if rarity == 'Legendary':
-            # Efecto de brillo dorado
-            overlay = Image.new('RGBA', canvas.size, (255, 215, 0, 0))
-            draw = ImageDraw.Draw(overlay)
+        else:
+            text_width = 0
             
-            # Dibujar líneas de brillo en las esquinas
-            glow_color = (255, 215, 0, 80)
-            for i in range(0, 40, 4):
-                draw.line([(i, 0), (0, i)], fill=glow_color, width=2)
-                draw.line([(canvas.width - i, 0), (canvas.width, i)], fill=glow_color, width=2)
-            
-            # Combinar con la imagen original
-            canvas = canvas.convert('RGBA')
-            canvas = Image.alpha_composite(canvas, overlay)
-            canvas = canvas.convert('RGB')
+        start_x = x - (text_width // 2)
         
-        elif rarity == 'Epic':
-            # Efecto de brillo púrpura más sutil
-            overlay = Image.new('RGBA', canvas.size, (156, 39, 176, 0))
-            draw = ImageDraw.Draw(overlay)
-            
-            glow_color = (156, 39, 176, 60)
-            for i in range(0, 30, 5):
-                draw.line([(i, 0), (0, i)], fill=glow_color, width=2)
-                draw.line([(canvas.width - i, 0), (canvas.width, i)], fill=glow_color, width=2)
-            
-            canvas = canvas.convert('RGBA')
-            canvas = Image.alpha_composite(canvas, overlay)
-            canvas = canvas.convert('RGB')
+        shadow_color = 'black'
+        for off_x in range(-outline_width, outline_width + 1):
+            for off_y in range(-outline_width, outline_width + 1):
+                draw.text((start_x + off_x, y + off_y), text, font=font, fill=shadow_color)
         
-        return canvas
-    
-    def _create_placeholder(self, member, group):
-        """Crea una imagen placeholder cuando no existe la imagen original"""
-        img = Image.new('RGB', (self.card_width, self.card_height), '#E0E0E0')
-        draw = ImageDraw.Draw(img)
-        
-        # Intentar cargar fuente
-        try:
-            if self.font_path:
-                font = ImageFont.truetype(self.font_path, 48)
-            else:
-                font = ImageFont.load_default()
-        except:
-            font = ImageFont.load_default()
-        
-        # Dibujar texto centrado
-        text = f"{member}\n{group}"
-        bbox = draw.textbbox((0, 0), text, font=font)
-        text_width = bbox[2] - bbox[0]
-        text_height = bbox[3] - bbox[1]
-        
-        x = (self.card_width - text_width) // 2
-        y = (self.card_height - text_height) // 2
-        
-        draw.text((x, y), text, fill='#757575', font=font, align='center')
-        
-        return img
-    
-    def _adjust_brightness(self, hex_color, factor):
-        """Ajusta el brillo de un color hexadecimal"""
+        draw.text((start_x, y), text, font=font, fill=fill_color)
+
+    def _add_shine_overlay(self, canvas):
+        overlay = Image.new('RGBA', canvas.size, (0,0,0,0))
+        draw = ImageDraw.Draw(overlay)
+        w, h = canvas.size
+        draw.polygon([(0, h), (150, h), (w, 0), (w-150, 0)], fill=(255, 255, 255, 30))
+        canvas.paste(overlay, (0,0), overlay)
+
+    def _hex_to_rgb(self, hex_color):
         hex_color = hex_color.lstrip('#')
-        r, g, b = tuple(int(hex_color[i:i+2], 16) for i in (0, 2, 4))
-        
-        r = min(255, int(r * factor))
-        g = min(255, int(g * factor))
-        b = min(255, int(b * factor))
-        
-        return f'#{r:02x}{g:02x}{b:02x}'
-    
+        return tuple(int(hex_color[i:i+2], 16) for i in (0, 2, 4))
+
+    # --- FUNCIÓN AGREGADA QUE FALTABA ---
     def create_card_grid(self, card_images, cols=3):
-        """Crea una cuadrícula de múltiples photocards"""
+        """Crea una cuadrícula con las imágenes de las cartas para el drop"""
         if not card_images:
             return None
         
-        # Calcular dimensiones
-        rows = (len(card_images) + cols - 1) // cols
-        grid_width = cols * (self.card_width + self.frame_width * 2) + (cols - 1) * 20
-        grid_height = rows * (self.card_height + self.frame_width * 2 + 120) + (rows - 1) * 20
+        # Filtrar Nones por si acaso alguna imagen falló totalmente
+        valid_images = [img for img in card_images if img is not None]
+        if not valid_images:
+            return None
+
+        rows = (len(valid_images) + cols - 1) // cols
         
-        # Crear canvas
-        grid = Image.new('RGB', (grid_width, grid_height), 'white')
-        
-        # Pegar imágenes
-        for idx, img_bytes in enumerate(card_images):
-            img = Image.open(img_bytes)
-            row = idx // cols
-            col = idx % cols
+        try:
+            # Abrir la primera imagen para obtener dimensiones base
+            sample = Image.open(valid_images[0])
+            w, h = sample.size
+        except Exception as e:
+            print(f"Error grid sample: {e}")
+            return None
             
-            x = col * (self.card_width + self.frame_width * 2 + 20)
-            y = row * (self.card_height + self.frame_width * 2 + 120 + 20)
-            
-            grid.paste(img, (x, y))
+        # Espacio entre cartas
+        padding = 40
         
-        # Convertir a bytes
+        grid_w = cols * w + (cols + 1) * padding
+        grid_h = rows * h + (rows + 1) * padding
+        
+        # Fondo oscuro para el grid
+        grid = Image.new('RGB', (grid_w, grid_h), '#121212')
+        
+        for idx, img_bytes in enumerate(valid_images):
+            try:
+                img = Image.open(img_bytes)
+                row = idx // cols
+                col = idx % cols
+                
+                x = padding + col * (w + padding)
+                y = padding + row * (h + padding)
+                
+                grid.paste(img, (x, y))
+            except Exception as e:
+                print(f"Error pegando en grid: {e}")
+                continue
+            
         grid_bytes = io.BytesIO()
-        grid.save(grid_bytes, format='PNG', quality=95)
+        grid.save(grid_bytes, format='PNG')
         grid_bytes.seek(0)
-        
         return grid_bytes
